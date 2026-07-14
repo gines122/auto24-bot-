@@ -17,12 +17,12 @@ app.post(`/bot${TOKEN}`, (req, res) => { bot.processUpdate(req.body); res.sendSt
 app.get('/', (req, res) => res.send('Auto24 Bot running'));
 
 // ── КОМАНДЫ ────────────────────────────────────────────────────────────
-bot.onText(/\/start/, msg => {
+bot.onText(/^\/start/, msg => {
   if (msg.chat.id.toString() !== CHAT_ID) return;
-  bot.sendMessage(CHAT_ID, 'Бот Auto24 активен.\n\n/заявки — последние 10\n/стат — статистика');
+  bot.sendMessage(CHAT_ID, 'Бот Auto24 активен.\n\n/zayavki — последние 10\n/stat — статистика');
 });
 
-bot.onText(/\/заявки/, async msg => {
+bot.onText(/^\/zayavki|^\/заявки/, async msg => {
   if (msg.chat.id.toString() !== CHAT_ID) return;
   try {
     const data = await fetch(`${GAS_URL}?action=leads&n=10`).then(r => r.json());
@@ -37,7 +37,7 @@ bot.onText(/\/заявки/, async msg => {
   } catch(e) { bot.sendMessage(CHAT_ID, 'Ошибка.'); }
 });
 
-bot.onText(/\/стат/, async msg => {
+bot.onText(/^\/stat|^\/стат/, async msg => {
   if (msg.chat.id.toString() !== CHAT_ID) return;
   try {
     const s = await fetch(`${GAS_URL}?action=stats`).then(r => r.json());
