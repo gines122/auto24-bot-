@@ -1,12 +1,15 @@
 const TelegramBot = require('node-telegram-bot-api');
-const express = require('express');
-const fetch = require('node-fetch');
+const express    = require('express');
+const fetch      = require('node-fetch');
+const { buildCard } = require('./card');
+const { buildKeyboard } = require('./keyboard');
 
 const TOKEN    = process.env.TG_TOKEN;
 const CHAT_ID  = process.env.TG_CHAT_ID;
 const GAS_URL  = process.env.GAS_URL;
 const HOOK_URL = process.env.WEBHOOK_URL;
 const PORT     = process.env.PORT || 3000;
+const BOT_VER  = '2.0';
 
 const bot = new TelegramBot(TOKEN);
 const app = express();
@@ -16,87 +19,313 @@ bot.setWebHook(`${HOOK_URL}/bot${TOKEN}`);
 app.post(`/bot${TOKEN}`, (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); });
 app.get('/', (req, res) => res.send('Auto24 Bot running'));
 
-// Форматирование телефона — только + и цифры
+// ── REPLY KEYBOARD ──────────────────────────────────────────────────────
+const MAIN_MENU = {
+  keyboard: [
+    ['📥 Новые заявки', '📋 Последние'],
+    ['📊 Статистика',   '🔍 Поиск'],
+    ['📈 Источники',    '⚙️ Настройки'],
+  ],
+  resize_keyboard: true,
+  is_persistent:   true,
+};
+
+const SETTINGS_MENU = {
+  keyboard: [
+    ['ℹ️ Версия бота',      '🧪 Тест уведомления'],
+    ['📋 Информация',       '⬅️ Назад'],
+  ],
+  resize_keyboard: true,
+  is_persistent:   true,
+};
+
+// ── SEARCH STATE ────────────────────────────────────────────────────────
+const searchPending = new Set(); // chat_ids ожидающих ввода поиска
+
+// ── УТИЛИТЫ ─────────────────────────────────────────────────────────────
 function formatPhone(phone) {
   return (phone || '').toString().replace("'", '').replace(/[^\d+]/g, '');
 }
 
-// ── КОМАНДЫ ────────────────────────────────────────────────────────────
+function guard(msg) {
+  return msg.chat.id.toString() !== CHAT_ID;
+}
+
+// ── КОМАНДЫ (оставлены для совместимости) ──────────────────────────────
 bot.onText(/^\/start/, msg => {
-  if (msg.chat.id.toString() !== CHAT_ID) return;
-  bot.sendMessage(CHAT_ID, 'Бот Auto24 активен.\n\n/zayavki — последние 10\n/stat — статистика');
+  if (guard(msg)) return;
+  bot.sendMessage(CHAT_ID, '🚗 Auto24 Bot активен. Выберите действие:', { reply_markup: MAIN_MENU });
 });
 
-bot.onText(/^\/zayavki|^\/заявки/, async msg => {
-  if (msg.chat.id.toString() !== CHAT_ID) return;
+bot.onText(/^\/zayavki|^\/заявки/, msg => {
+  if (guard(msg)) return;
+  sendLastLeads(10);
+});
+
+bot.onText(/^\/stat|^\/стат/, msg => {
+  if (guard(msg)) return;
+  sendStats();
+});
+
+// ── REPLY KEYBOARD HANDLERS ─────────────────────────────────────────────
+bot.on('message', async msg => {
+  if (guard(msg)) return;
+  const text = (msg.text || '').trim();
+  if (!text || text.startsWith('/')) return;
+
+  // Если ожидаем поисковый запрос
+  if (searchPending.has(msg.chat.id)) {
+    searchPending.delete(msg.chat.id);
+    await handleSearch(text);
+    return;
+  }
+
+  switch (text) {
+    case '📥 Новые заявки':    await sendNewLeads();     break;
+    case '📋 Последние':       await sendLastLeads(10);  break;
+    case '📊 Статистика':      await sendStats();        break;
+    case '🔍 Поиск':           await startSearch(msg);   break;
+    case '📈 Источники':       await sendSources();      break;
+    case '⚙️ Настройки':      sendSettingsMenu();       break;
+    case 'ℹ️ Версия бота':     sendVersion();            break;
+    case '🧪 Тест уведомления': sendTestNotification();  break;
+    case '📋 Информация':      sendInfo();               break;
+    case '⬅️ Назад':           sendMainMenu();           break;
+  }
+});
+
+// ── ОБРАБОТЧИКИ РАЗДЕЛОВ ────────────────────────────────────────────────
+async function sendNewLeads() {
   try {
-    const data = await fetch(`${GAS_URL}?action=leads&n=10`).then(r => r.json());
-    if (!data.length) { bot.sendMessage(CHAT_ID, 'Заявок пока нет.'); return; }
-    let text = '📋 Последние заявки:\n\n';
-    data.forEach((l, i) => {
-      const phone = formatPhone(l.phone);
-      text += `${i+1}. ${l.name||'—'} · ${phone}\n`;
-      text += `   Статус: ${l.status} · Вердикт: ${l.verdict}\n`;
-      text += `   ${l.date}\n\n`;
+    const data = await fetch(`${GAS_URL}?action=leads&n=50`).then(r => r.json());
+    const fresh = data.filter(l => {
+      const s = (l.status || '').trim();
+      return s === '🟡 Новая' || s === 'Новая' || s === '';
     });
-    bot.sendMessage(CHAT_ID, text);
-  } catch(e) { bot.sendMessage(CHAT_ID, 'Ошибка.'); }
-});
+    if (!fresh.length) {
+      bot.sendMessage(CHAT_ID, 'Сегодня новых заявок нет.', { reply_markup: MAIN_MENU });
+      return;
+    }
+    let text = `📥 Новые заявки: ${fresh.length}\n\n`;
+    fresh.forEach((l, i) => {
+      const id    = String(l.leadId || l.row || 0).padStart(6, '0');
+      const phone = formatPhone(l.phone);
+      text += `${i + 1}. #${id} ${l.name || '—'} · ${phone}\n`;
+      text += `   ${l.date || ''}\n\n`;
+    });
+    bot.sendMessage(CHAT_ID, text, { reply_markup: MAIN_MENU });
+  } catch (e) {
+    bot.sendMessage(CHAT_ID, 'Ошибка при загрузке заявок.', { reply_markup: MAIN_MENU });
+  }
+}
 
-bot.onText(/^\/stat|^\/стат/, async msg => {
-  if (msg.chat.id.toString() !== CHAT_ID) return;
+async function sendLastLeads(n) {
+  try {
+    const data = await fetch(`${GAS_URL}?action=leads&n=${n}`).then(r => r.json());
+    if (!data.length) {
+      bot.sendMessage(CHAT_ID, 'Заявок пока нет.', { reply_markup: MAIN_MENU });
+      return;
+    }
+    let text = `📋 Последние ${data.length} заявок:\n\n`;
+    data.forEach((l, i) => {
+      const id    = String(l.leadId || l.row || 0).padStart(6, '0');
+      const phone = formatPhone(l.phone);
+      text += `${i + 1}. #${id} ${l.name || '—'} · ${phone}\n`;
+      text += `   ${l.status || '—'} · ${l.verdict || '—'}\n`;
+      text += `   ${l.date || ''}\n\n`;
+    });
+    bot.sendMessage(CHAT_ID, text, { reply_markup: MAIN_MENU });
+  } catch (e) {
+    bot.sendMessage(CHAT_ID, 'Ошибка при загрузке заявок.', { reply_markup: MAIN_MENU });
+  }
+}
+
+async function sendStats() {
   try {
     const s = await fetch(`${GAS_URL}?action=stats`).then(r => r.json());
-    let text = `📊 Статистика Auto24\n\nВсего: ${s.total}\n\nСтатусы:\n`;
-    Object.entries(s.statuses||{}).forEach(([k,v]) => { text += `${k}: ${v}\n`; });
-    text += '\nВердикты:\n';
-    Object.entries(s.verdicts||{}).forEach(([k,v]) => { text += `${k}: ${v}\n`; });
-    bot.sendMessage(CHAT_ID, text);
-  } catch(e) { bot.sendMessage(CHAT_ID, 'Ошибка.'); }
-});
 
-// ── КНОПКИ ─────────────────────────────────────────────────────────────
-const STATUS_MAP  = {
-  work:   '🔄 В работе',
+    // Считаем конверсию (Купил / всего * 100)
+    const bought     = s.verdicts?.['🟢 Купил'] || 0;
+    const conversion = s.total ? Math.round((bought / s.total) * 100) : 0;
+
+    let text = `📊 Статистика Auto24\n\nВсего заявок: ${s.total}\n`;
+
+    // Сегодня
+    const today = s.today || {};
+    if (today.total) {
+      text += `\n📅 Сегодня: ${today.total}\n`;
+      if (today.statuses) {
+        const map = {
+          '🟡 Новая':    'Новых',
+          '🔵 В работе': 'В работе',
+          '📞 Позвонил': 'Позвонили',
+          '🟢 Купил':    'Купили',
+          '🔴 Отказ':    'Отказ',
+        };
+        Object.entries(map).forEach(([k, label]) => {
+          if (today.statuses[k]) text += `  ${label}: ${today.statuses[k]}\n`;
+        });
+      }
+    }
+
+    text += `\nВсе статусы:\n`;
+    Object.entries(s.statuses || {}).forEach(([k, v]) => { text += `${k}: ${v}\n`; });
+
+    text += `\nВердикты:\n`;
+    Object.entries(s.verdicts || {}).forEach(([k, v]) => { text += `${k}: ${v}\n`; });
+
+    text += `\n📈 Конверсия: ${conversion}%`;
+
+    bot.sendMessage(CHAT_ID, text, { reply_markup: MAIN_MENU });
+  } catch (e) {
+    bot.sendMessage(CHAT_ID, 'Ошибка при загрузке статистики.', { reply_markup: MAIN_MENU });
+  }
+}
+
+async function sendSources() {
+  try {
+    const s = await fetch(`${GAS_URL}?action=sources`).then(r => r.json());
+
+    if (!s.total) {
+      bot.sendMessage(CHAT_ID, 'Данных по источникам нет.', { reply_markup: MAIN_MENU });
+      return;
+    }
+
+    let text = `📈 Источники трафика\n\n`;
+    text += `Всего заявок: ${s.total}\n`;
+
+    if (s.today_total) text += `Сегодня: ${s.today_total}\n`;
+
+    text += `\n`;
+    Object.entries(s.sources || {})
+      .sort((a, b) => b[1] - a[1])
+      .forEach(([k, v]) => { text += `${k} — ${v}\n`; });
+
+    if (Object.keys(s.campaigns || {}).length) {
+      text += `\nКампании (Google Ads):\n`;
+      Object.entries(s.campaigns)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 10)
+        .forEach(([k, v]) => { text += `  ${k} — ${v}\n`; });
+    }
+
+    bot.sendMessage(CHAT_ID, text, { reply_markup: MAIN_MENU });
+  } catch (e) {
+    bot.sendMessage(CHAT_ID, 'Ошибка при загрузке источников.', { reply_markup: MAIN_MENU });
+  }
+}
+
+async function startSearch(msg) {
+  searchPending.add(msg.chat.id);
+  bot.sendMessage(CHAT_ID, '🔍 Введите телефон, имя или номер заявки (#000001):', { reply_markup: MAIN_MENU });
+}
+
+async function handleSearch(query) {
+  try {
+    const q = encodeURIComponent(query.trim());
+    const results = await fetch(`${GAS_URL}?action=search&q=${q}`).then(r => r.json());
+
+    if (!results.length) {
+      bot.sendMessage(CHAT_ID, `По запросу «${query}» ничего не найдено.`, { reply_markup: MAIN_MENU });
+      return;
+    }
+
+    for (const l of results) {
+      const card = buildCard(l, l.leadId || l.row);
+      const kb   = buildKeyboard(l, l.row);
+      bot.sendMessage(CHAT_ID, card, { reply_markup: kb });
+    }
+  } catch (e) {
+    bot.sendMessage(CHAT_ID, 'Ошибка поиска.', { reply_markup: MAIN_MENU });
+  }
+}
+
+function sendSettingsMenu() {
+  bot.sendMessage(CHAT_ID, '⚙️ Настройки', { reply_markup: SETTINGS_MENU });
+}
+
+function sendMainMenu() {
+  bot.sendMessage(CHAT_ID, 'Главное меню:', { reply_markup: MAIN_MENU });
+}
+
+function sendVersion() {
+  bot.sendMessage(CHAT_ID, `ℹ️ Auto24 Bot v${BOT_VER}`, { reply_markup: SETTINGS_MENU });
+}
+
+function sendInfo() {
+  const text = [
+    '📋 Auto24 Group — CRM-бот',
+    '',
+    'Бот принимает заявки с сайта, сохраняет в Google Sheets и позволяет управлять статусами прямо из Telegram.',
+    '',
+    `Версия: ${BOT_VER}`,
+    'Сервер: Render',
+    'База данных: Google Sheets',
+  ].join('\n');
+  bot.sendMessage(CHAT_ID, text, { reply_markup: SETTINGS_MENU });
+}
+
+function sendTestNotification() {
+  bot.sendMessage(CHAT_ID,
+    `🧪 Тестовое уведомление\n\nБот работает корректно.\n${new Date().toLocaleString('ru-RU', { timeZone: 'Europe/Kyiv' })}`,
+    { reply_markup: SETTINGS_MENU }
+  );
+}
+
+// ── INLINE КНОПКИ ────────────────────────────────────────────────────────
+const STATUS_MAP = {
+  work:   '🔵 В работе',
   called: '📞 Позвонил',
-  done:   '✔️ Закрыт',
-  reject: '❌ Отказ'
+  done:   '⚫ Закрыт',
+  reject: '🔴 Отказ',
 };
 const VERDICT_MAP = {
   bought:   '🟢 Купил',
   thinking: '🤔 Думает',
-  callback: '📲 Перезвонить',
+  callback: '📅 Перезвонить',
   order:    '🔧 Под заказ',
-  credit:   '🏦 Отказ в кредите',
-  minus:    '👎 Минус'
+  credit:   '🏦 Отказ банка',
 };
 
 bot.on('callback_query', async cb => {
   const parts = cb.data.split('_');
   const type  = parts[0];
+
   if (type === 'noop') { bot.answerCallbackQuery(cb.id); return; }
+
+  if (type === 'copy') {
+    const match = (cb.message.text || '').match(/📞 ([+\d]+)/);
+    const phone = match ? match[1] : '—';
+    bot.answerCallbackQuery(cb.id, { text: '📋 Номер отправлен ниже', show_alert: false });
+    bot.sendMessage(CHAT_ID, `📋 Номер для копирования:\n${phone}`);
+    return;
+  }
+
   if (type !== 's' && type !== 'v') return;
 
   const row   = parseInt(parts[1]);
   const key   = parts[2];
   const label = type === 's' ? STATUS_MAP[key] : VERDICT_MAP[key];
-  if (!label) return;
+  if (!label) { bot.answerCallbackQuery(cb.id, { text: 'Неизвестное действие' }); return; }
 
   try {
-    await fetch(`${GAS_URL}?action=update&row=${row}&col=${type==='s'?10:11}&value=${encodeURIComponent(label)}`);
+    await fetch(
+      `${GAS_URL}?action=update&row=${row}&col=${type === 's' ? 10 : 11}&value=${encodeURIComponent(label)}`
+    );
 
-    let newText = cb.message.text;
-    if (type === 's') newText = newText.replace(/📊 Статус: .+/, '📊 Статус: ' + label);
-    if (type === 'v') newText = newText.replace(/🏁 Вердикт: .+/, '🏁 Вердикт: ' + label);
+    let newText = cb.message.text || '';
+    if (type === 's') newText = newText.replace(/^Статус:\n.+/m,  `Статус:\n${label}`);
+    if (type === 'v') newText = newText.replace(/^Вердикт:\n.+/m, `Вердикт:\n${label}`);
 
     await bot.editMessageText(newText, {
-      chat_id: cb.message.chat.id,
-      message_id: cb.message.message_id,
-      reply_markup: cb.message.reply_markup
+      chat_id:      cb.message.chat.id,
+      message_id:   cb.message.message_id,
+      reply_markup: cb.message.reply_markup,
     });
-    bot.answerCallbackQuery(cb.id, {text: 'Сохранено!'});
-  } catch(e) {
-    bot.answerCallbackQuery(cb.id, {text: 'Ошибка'});
+
+    bot.answerCallbackQuery(cb.id, { text: '✅ Сохранено' });
+  } catch (e) {
+    bot.answerCallbackQuery(cb.id, { text: '❌ Ошибка сохранения' });
   }
 });
 
@@ -107,13 +336,16 @@ async function checkStaleLeads() {
     if (!data.length) return;
     data.forEach(l => {
       const phone = formatPhone(l.phone);
-      bot.sendMessage(CHAT_ID,
-        `⚠️ Заявка без статуса более 24 часов!\n\n👤 ${l.name||'—'}\n📞 ${phone}\n🕐 ${l.date}`
+      bot.sendMessage(
+        CHAT_ID,
+        `⚠️ Заявка без статуса более 24 часов!\n\n👤 ${l.name || '—'}\n📞 ${phone}\n🕐 ${l.date || ''}`
       );
     });
-  } catch(e) {}
+  } catch (e) {}
 }
 
-setInterval(checkStaleLeads, 60 * 60 * 1000); // каждый час
+setInterval(checkStaleLeads, 60 * 60 * 1000);
 
-app.listen(PORT, () => console.log(`Running on port ${PORT}`));
+module.exports = { buildCard, buildKeyboard };
+
+app.listen(PORT, () => console.log(`Auto24 Bot v${BOT_VER} running on port ${PORT}`));
