@@ -293,14 +293,6 @@ bot.on('callback_query', async cb => {
 
   if (type === 'noop') { bot.answerCallbackQuery(cb.id); return; }
 
-  if (type === 'copy') {
-    const match = (cb.message.text || '').match(/📞 ([+\d]+)/);
-    const phone = match ? match[1] : '—';
-    bot.answerCallbackQuery(cb.id, { text: '📋 Номер отправлен ниже', show_alert: false });
-    bot.sendMessage(CHAT_ID, `📋 Номер для копирования:\n${phone}`);
-    return;
-  }
-
   if (type !== 's' && type !== 'v') return;
 
   const row   = parseInt(parts[1]);

@@ -52,7 +52,7 @@ function buildKeyboard(data, row) {
   if (city) {
     utilRow.push({ text: '🗺 Карта', url: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(city)}` });
   }
-  utilRow.push({ text: '📋 Копировать номер', callback_data: `copy_${row}` });
+  utilRow.push({ text: '📋 Копировать номер', copy_text: { text: data.phone || digits } });
   keyboard.push(utilRow);
 
   return { inline_keyboard: keyboard };
