@@ -16,6 +16,11 @@ bot.setWebHook(`${HOOK_URL}/bot${TOKEN}`);
 app.post(`/bot${TOKEN}`, (req, res) => { bot.processUpdate(req.body); res.sendStatus(200); });
 app.get('/', (req, res) => res.send('Auto24 Bot running'));
 
+// Форматирование телефона — только + и цифры
+function formatPhone(phone) {
+  return (phone || '').toString().replace("'", '').replace(/[^\d+]/g, '');
+}
+
 // ── КОМАНДЫ ────────────────────────────────────────────────────────────
 bot.onText(/^\/start/, msg => {
   if (msg.chat.id.toString() !== CHAT_ID) return;
@@ -29,7 +34,8 @@ bot.onText(/^\/zayavki|^\/заявки/, async msg => {
     if (!data.length) { bot.sendMessage(CHAT_ID, 'Заявок пока нет.'); return; }
     let text = '📋 Последние заявки:\n\n';
     data.forEach((l, i) => {
-      text += `${i+1}. ${l.name||'—'} · ${l.phone||'—'}\n`;
+      const phone = formatPhone(l.phone);
+      text += `${i+1}. ${l.name||'—'} · ${phone}\n`;
       text += `   Статус: ${l.status} · Вердикт: ${l.verdict}\n`;
       text += `   ${l.date}\n\n`;
     });
@@ -93,5 +99,21 @@ bot.on('callback_query', async cb => {
     bot.answerCallbackQuery(cb.id, {text: 'Ошибка'});
   }
 });
+
+// ── НАПОМИНАНИЕ О ЗАЯВКАХ БЕЗ СТАТУСА (каждый час) ────────────────────
+async function checkStaleLeads() {
+  try {
+    const data = await fetch(`${GAS_URL}?action=stale`).then(r => r.json());
+    if (!data.length) return;
+    data.forEach(l => {
+      const phone = formatPhone(l.phone);
+      bot.sendMessage(CHAT_ID,
+        `⚠️ Заявка без статуса более 24 часов!\n\n👤 ${l.name||'—'}\n📞 ${phone}\n🕐 ${l.date}`
+      );
+    });
+  } catch(e) {}
+}
+
+setInterval(checkStaleLeads, 60 * 60 * 1000); // каждый час
 
 app.listen(PORT, () => console.log(`Running on port ${PORT}`));
