@@ -291,33 +291,51 @@ bot.on('callback_query', async cb => {
   const parts = cb.data.split('_');
   const type  = parts[0];
 
-  if (type === 'noop') { bot.answerCallbackQuery(cb.id); return; }
+  if (type === 'noop') { bot.answerCallbackQuery(cb.id).catch(() => {}); return; }
 
   if (type !== 's' && type !== 'v') return;
 
   const row   = parseInt(parts[1]);
-  const key   = parts[2];
+  const key   = parts.slice(2).join('_');
   const label = type === 's' ? STATUS_MAP[key] : VERDICT_MAP[key];
-  if (!label) { bot.answerCallbackQuery(cb.id, { text: 'Неизвестное действие' }); return; }
+  if (!label) {
+    bot.answerCallbackQuery(cb.id, { text: 'Неизвестное действие' }).catch(() => {});
+    return;
+  }
+
+  // Сначала отвечаем Telegram — до любых async операций (60 сек лимит)
+  bot.answerCallbackQuery(cb.id, { text: '⏳ Сохраняю...' }).catch(() => {});
 
   try {
-    await fetch(
+    // Сохранить в Google Sheets
+    const gasRes = await fetch(
       `${GAS_URL}?action=update&row=${row}&col=${type === 's' ? 10 : 11}&value=${encodeURIComponent(label)}`
-    );
+    ).then(r => r.json()).catch(() => null);
 
+    // Обновить текст карточки (поддерживаем оба формата: "Статус: X" и "Статус:\nX")
     let newText = cb.message.text || '';
-    if (type === 's') newText = newText.replace(/^Статус:\n.+/m,  `Статус:\n${label}`);
-    if (type === 'v') newText = newText.replace(/^Вердикт:\n.+/m, `Вердикт:\n${label}`);
+    if (type === 's') {
+      newText = newText
+        .replace(/Статус: [^\n]+/,        `Статус: ${label}`)   // формат GAS (одна строка)
+        .replace(/^(Статус:)\n[^\n]+/m,   `$1\n${label}`);      // формат bot (две строки)
+    }
+    if (type === 'v') {
+      newText = newText
+        .replace(/Вердикт: [^\n]+/,       `Вердикт: ${label}`)  // формат GAS
+        .replace(/^(Вердикт:)\n[^\n]+/m,  `$1\n${label}`);      // формат bot
+    }
 
     await bot.editMessageText(newText, {
       chat_id:      cb.message.chat.id,
       message_id:   cb.message.message_id,
       reply_markup: cb.message.reply_markup,
-    });
+    }).catch(() => {});
 
-    bot.answerCallbackQuery(cb.id, { text: '✅ Сохранено' });
+    // Подтверждение — отдельным сообщением (надёжнее чем answerCallbackQuery при позднем ответе)
+    bot.sendMessage(CHAT_ID, `✅ ${label} — сохранено (строка ${row})`).catch(() => {});
+
   } catch (e) {
-    bot.answerCallbackQuery(cb.id, { text: '❌ Ошибка сохранения' });
+    bot.sendMessage(CHAT_ID, `❌ Ошибка сохранения: ${e.message}`).catch(() => {});
   }
 });
 
