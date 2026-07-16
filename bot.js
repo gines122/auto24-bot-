@@ -331,8 +331,6 @@ bot.on('callback_query', async cb => {
       reply_markup: cb.message.reply_markup,
     }).catch(() => {});
 
-    // Подтверждение — отдельным сообщением (надёжнее чем answerCallbackQuery при позднем ответе)
-    bot.sendMessage(CHAT_ID, `✅ ${label} — сохранено (строка ${row})`).catch(() => {});
 
   } catch (e) {
     bot.sendMessage(CHAT_ID, `❌ Ошибка сохранения: ${e.message}`).catch(() => {});
